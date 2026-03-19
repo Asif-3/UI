@@ -62,8 +62,8 @@ const CandidateReview = () => {
     try {
       const formattedData = {
         ...candidate,
-        skills: typeof candidate.skills === 'string'
-          ? candidate.skills.split(',').map(s => s.trim())
+        skills: Array.isArray(candidate.skills)
+          ? candidate.skills.join(', ')
           : candidate.skills
       };
 

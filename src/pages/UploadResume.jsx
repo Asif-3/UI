@@ -1,15 +1,16 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Upload, X, CheckCircle, File, AlertCircle,
-  Clock, Trash2, RefreshCw, Calendar
+  Clock, Trash2, RefreshCw, Calendar, AlertTriangle,
+  FileWarning, Copy, Info, ShieldCheck
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { useToast, ToastContainer } from '../components/Toast';
 
-// Helper: format ISO date string to readable "DD MMM YYYY, HH:MM AM/PM"
+// ── Format date helper ──
 const formatDateTime = (isoStr) => {
   if (!isoStr) return '—';
-  // Java LocalDateTime comes as [2025,3,17,10,30,0] array OR ISO string
   if (Array.isArray(isoStr)) {
     const [y, mo, d, h = 0, mi = 0] = isoStr;
     const dt = new Date(y, mo - 1, d, h, mi);
@@ -36,12 +37,26 @@ const getTimeMs = (isoStr) => {
   return isNaN(d.getTime()) ? 0 : d.getTime();
 };
 
-// Status badge component
+// ── Allowed file types ──
+const ALLOWED_TYPES = [
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+];
+const ALLOWED_EXTENSIONS = ['.pdf', '.doc', '.docx'];
+
+const isValidFile = (file) => {
+  if (ALLOWED_TYPES.includes(file.type)) return true;
+  const name = file.name.toLowerCase();
+  return ALLOWED_EXTENSIONS.some(ext => name.endsWith(ext));
+};
+
+// ── Status Badge ──
 const StatusBadge = ({ status }) => {
   const map = {
-    Pending: { cls: 'bg-yellow-100 text-yellow-800 border-yellow-200', icon: <Clock className="w-3 h-3" /> },
+    Pending:  { cls: 'bg-yellow-100 text-yellow-800 border-yellow-200', icon: <Clock className="w-3 h-3" /> },
     Verified: { cls: 'bg-green-100  text-green-800  border-green-200', icon: <CheckCircle className="w-3 h-3" /> },
-    Deleted: { cls: 'bg-red-100    text-red-700    border-red-200', icon: <Trash2 className="w-3 h-3" /> },
+    Deleted:  { cls: 'bg-red-100    text-red-700    border-red-200',   icon: <Trash2 className="w-3 h-3" /> },
   };
   const cfg = map[status] || map.Pending;
   return (
@@ -51,146 +66,214 @@ const StatusBadge = ({ status }) => {
   );
 };
 
+// ── Confirm Dialog (custom, no browser confirm) ──
+const ConfirmDialog = ({ title, message, confirmLabel, confirmIcon, confirmColor = 'red', onConfirm, onCancel }) => (
+  <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onCancel} />
+    <div className="relative bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full border border-gray-100 animate-in">
+      <div className="flex items-center gap-3 mb-4">
+        <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+          confirmColor === 'red' ? 'bg-red-100' : 'bg-blue-100'
+        }`}>
+          {confirmColor === 'red' ? <AlertTriangle className="w-5 h-5 text-red-600" /> : <ShieldCheck className="w-5 h-5 text-blue-600" />}
+        </div>
+        <h3 className="text-base font-semibold text-gray-900">{title || 'Confirm Action'}</h3>
+      </div>
+      <p className="text-sm text-gray-600 mb-6">{message}</p>
+      <div className="flex gap-3 justify-end">
+        <button onClick={onCancel}
+          className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition">
+          Cancel
+        </button>
+        <button onClick={onConfirm}
+          className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition flex items-center gap-1.5 shadow-sm ${
+            confirmColor === 'red' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
+          }`}>
+          {confirmIcon || <Trash2 className="w-4 h-4" />} {confirmLabel || 'Delete'}
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
+// ── Upload Result Badge ──
+const ResultBadge = ({ status }) => {
+  const map = {
+    SUCCESS:   { cls: 'bg-emerald-100 text-emerald-800 border-emerald-200', icon: <CheckCircle className="w-3 h-3" />, label: 'Success' },
+    DUPLICATE: { cls: 'bg-amber-100 text-amber-800 border-amber-200',       icon: <Copy className="w-3 h-3" />,        label: 'Duplicate' },
+    INVALID:   { cls: 'bg-red-100 text-red-700 border-red-200',             icon: <FileWarning className="w-3 h-3" />,  label: 'Invalid' },
+    ERROR:     { cls: 'bg-red-100 text-red-700 border-red-200',             icon: <AlertCircle className="w-3 h-3" />,  label: 'Error' },
+  };
+  const cfg = map[status] || map.ERROR;
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full border ${cfg.cls}`}>
+      {cfg.icon}{cfg.label}
+    </span>
+  );
+};
+
+
 const UploadResume = () => {
   const [files, setFiles] = useState([]);
+  const [invalidFiles, setInvalidFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState(null);
-  const [errorMessage, setErrorMessage] = useState('');
-
-  // Pending resumes fetched from DB
-  const [pendingResumes, setPendingResumes] = useState([]);
-  const [loadingPending, setLoadingPending] = useState(true);
-  const [sortOrder, setSortOrder] = useState('latest');
+  const [uploadResults, setUploadResults] = useState(null);
+  const [dragOver, setDragOver] = useState(false);
 
   const fileInputRef = useRef(null);
   const navigate = useNavigate();
+  const { toasts, addToast, removeToast } = useToast();
 
-  // ---- fetch pending resumes from backend ----
-  const fetchPending = useCallback(async () => {
-    setLoadingPending(true);
-    try {
-      const res = await api.get('/resume/pending');
-      setPendingResumes((res.data || []).filter(r => r.status !== 'Deleted'));
-    } catch (err) {
-      console.error('Failed to load pending resumes:', err);
-    } finally {
-      setLoadingPending(false);
-    }
-  }, []);
-
-  useEffect(() => { fetchPending(); }, [fetchPending]);
-
-  // ---- file selection ----
+  // ── File selection with validation ──
   const validateAndAdd = (selected) => {
-    const validFiles = selected.filter(f =>
-      f.type === 'application/pdf' ||
-      f.name.endsWith('.doc') ||
-      f.name.endsWith('.docx')
-    );
-    if (validFiles.length !== selected.length) {
-      setErrorMessage('Some files were rejected. Only PDF, DOC, and DOCX are supported.');
-      setUploadStatus('error');
-    } else {
-      setErrorMessage('');
-      setUploadStatus(null);
+    const valid = [];
+    const invalid = [];
+
+    selected.forEach(f => {
+      if (isValidFile(f)) {
+        valid.push(f);
+      } else {
+        invalid.push({ name: f.name, reason: 'Unsupported format. Only PDF, DOC, DOCX allowed.' });
+      }
+    });
+
+    if (invalid.length > 0) {
+      setInvalidFiles(prev => [...prev, ...invalid]);
+      addToast(
+        `${invalid.length} file${invalid.length > 1 ? 's' : ''} rejected — unsupported format.`,
+        'warning'
+      );
     }
-    setFiles(prev => [...prev, ...validFiles]);
+
+    if (valid.length > 0) {
+      setFiles(prev => [...prev, ...valid]);
+    }
   };
 
-  const handleFileChange = (e) => validateAndAdd(Array.from(e.target.files));
+  const handleFileChange = (e) => {
+    validateAndAdd(Array.from(e.target.files));
+    e.target.value = '';
+  };
 
   const removeFile = (i) => setFiles(files.filter((_, idx) => idx !== i));
+  const clearInvalid = () => setInvalidFiles([]);
 
-  const onDragOver = (e) => e.preventDefault();
+  const onDragOver = (e) => { e.preventDefault(); setDragOver(true); };
+  const onDragLeave = () => setDragOver(false);
   const onDrop = (e) => {
     e.preventDefault();
+    setDragOver(false);
     if (e.dataTransfer.files?.length > 0) validateAndAdd(Array.from(e.dataTransfer.files));
   };
 
-  // ---- upload & parse ----
+  // ── Upload & Parse ──
   const handleUpload = async () => {
     if (files.length === 0) return;
     setUploading(true);
-    setUploadStatus(null);
-    setErrorMessage('');
+    setUploadResults(null);
 
     const formData = new FormData();
     for (let file of files) formData.append('file', file);
 
     try {
-      await api.post('/resume/upload', formData, {
+      const response = await api.post('/resume/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      setUploadStatus('success');
+
+      const data = response.data;
+      setUploadResults(data);
       setFiles([]);
-      await fetchPending();
+
+      // Show summary toast
+      const { successCount = 0, duplicateCount = 0, invalidCount = 0, errorCount = 0 } = data;
+
+      if (successCount > 0) {
+        addToast(`${successCount} resume${successCount > 1 ? 's' : ''} uploaded successfully!`, 'success');
+      }
+      if (duplicateCount > 0) {
+        addToast(`${duplicateCount} duplicate${duplicateCount > 1 ? 's' : ''} detected and skipped.`, 'warning');
+      }
+      if (invalidCount > 0) {
+        addToast(`${invalidCount} file${invalidCount > 1 ? 's' : ''} had invalid format.`, 'error');
+      }
+      if (errorCount > 0) {
+        addToast(`${errorCount} file${errorCount > 1 ? 's' : ''} failed to process.`, 'error');
+      }
+
+      // Log to backend
+      try {
+        await api.post('/resume/log', {
+          level: 'INFO',
+          source: 'UploadResume',
+          message: `Upload completed: ${successCount} success, ${duplicateCount} duplicates, ${invalidCount} invalid, ${errorCount} errors`
+        });
+      } catch (_) { /* silent */ }
+
+
     } catch (error) {
       console.error('Upload Error:', error);
-      setUploadStatus('error');
-      setErrorMessage(
-        error.response?.data?.message ||
-        'Failed to upload resumes. Please ensure the backend is running and try again.'
+      addToast(
+        error.response?.data?.message || 'Failed to upload resumes. Please ensure the backend is running.',
+        'error'
       );
     } finally {
       setUploading(false);
     }
   };
 
-  // ---- verify a pending resume ----
-  const handleVerify = async (id) => {
-    try {
-      await api.post(`/resume/verify/${id}`);
-      alert('Resume verified and moved to dashboard successfully.');
-      await fetchPending();
-    } catch (err) {
-      console.error('Verify error:', err);
-      // Give a highly specific error message so we know if it's a 404/405 (Not Restarted) or an actual DB error
-      if (err.response?.status === 404 || err.response?.status === 405) {
-         alert('API Error (' + err.response.status + '): The Verification endpoint was not found. Have you restarted the Spring Boot backend server after the recent changes?');
-      } else {
-         const backendMsg = err.response?.data?.message;
-         alert(backendMsg ? backendMsg : 'Verification failed due to a server error. Please check the backend console.');
-      }
-    }
-  };
-
-  // ---- soft-delete a pending resume ----
-  const handleDelete = async (id) => {
-    if (!window.confirm('Remove this pending resume?')) return;
-    try {
-      await api.delete(`/resume/pending/${id}`);
-      await fetchPending();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Delete failed.');
-    }
-  };
-
-  const sortedPending = [...pendingResumes].sort((a, b) => {
-    const timeA = getTimeMs(a.uploadedAt);
-    const timeB = getTimeMs(b.uploadedAt);
-    return sortOrder === 'latest' ? timeB - timeA : timeA - timeB;
-  });
+  const successResults  = uploadResults?.results?.filter(r => r.status === 'SUCCESS')   || [];
+  const duplicateResults = uploadResults?.results?.filter(r => r.status === 'DUPLICATE') || [];
+  const invalidResults  = uploadResults?.results?.filter(r => r.status === 'INVALID')   || [];
+  const errorResults    = uploadResults?.results?.filter(r => r.status === 'ERROR')     || [];
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
+      {/* Toast notifications */}
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
+
       {/* Page heading */}
       <div>
         <h1 className="text-3xl font-bold text-gray-900">Upload Resumes</h1>
         <p className="text-gray-500 mt-1">Select or drag-and-drop candidate resumes for parsing.</p>
       </div>
 
+      {/* Bulk upload info banner */}
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
+        <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0 mt-0.5">
+          <Info className="w-4 h-4 text-blue-600" />
+        </div>
+        <div>
+          <h4 className="text-sm font-semibold text-blue-800">Bulk Upload Available</h4>
+          <p className="text-xs text-blue-600 mt-0.5">
+            You can select and upload multiple resume files at once. Supported formats: <strong>PDF, DOC, DOCX</strong>.
+            Each file will be validated, parsed, and checked for duplicates automatically.
+          </p>
+        </div>
+      </div>
+
       {/* Drop zone */}
       <div
-        className="bg-white rounded-2xl shadow-sm border-2 border-dashed border-gray-300 p-10 flex flex-col items-center justify-center transition hover:bg-gray-50 cursor-pointer"
+        className={`bg-white rounded-2xl shadow-sm border-2 border-dashed p-10 flex flex-col items-center justify-center transition-all cursor-pointer ${
+          dragOver
+            ? 'border-blue-400 bg-blue-50 scale-[1.01]'
+            : 'border-gray-300 hover:bg-gray-50 hover:border-gray-400'
+        }`}
         onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
         onDrop={onDrop}
         onClick={() => fileInputRef.current.click()}
       >
-        <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mb-4">
+        <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-4 transition-colors ${
+          dragOver ? 'bg-blue-100 text-blue-600' : 'bg-blue-50 text-blue-600'
+        }`}>
           <Upload className="w-8 h-8" />
         </div>
-        <h3 className="text-lg font-semibold text-gray-800 mb-1">Click or drag files to upload</h3>
-        <p className="text-sm text-gray-500 mb-6">Supported formats: PDF, DOC, DOCX (Max 10 MB per file)</p>
+        <h3 className="text-lg font-semibold text-gray-800 mb-1">
+          {dragOver ? 'Drop files here...' : 'Click or drag files to upload'}
+        </h3>
+        <p className="text-sm text-gray-500 mb-6">
+          Supported: PDF, DOC, DOCX &nbsp;·&nbsp; Max 5 MB per file &nbsp;·&nbsp; Multiple files supported
+        </p>
         <input
           type="file"
           multiple
@@ -204,26 +287,35 @@ const UploadResume = () => {
         </button>
       </div>
 
-      {/* Error alert */}
-      {uploadStatus === 'error' && (
-        <div className="bg-red-50 text-red-700 p-4 rounded-xl flex flex-col gap-1 border border-red-200">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-5 h-5 flex-shrink-0" />
-            <h4 className="font-semibold">Upload Failed</h4>
+      {/* ── Invalid Files Panel ── */}
+      {invalidFiles.length > 0 && (
+        <div className="bg-red-50 rounded-xl border border-red-200 overflow-hidden">
+          <div className="px-5 py-3 border-b border-red-200 flex justify-between items-center bg-red-100/50">
+            <div className="flex items-center gap-2">
+              <FileWarning className="w-4 h-4 text-red-500" />
+              <h3 className="font-semibold text-red-800 text-sm">
+                Invalid Files ({invalidFiles.length})
+              </h3>
+            </div>
+            <button onClick={clearInvalid} className="text-xs text-red-600 hover:text-red-800 font-medium">
+              Dismiss
+            </button>
           </div>
-          <p className="text-sm ml-7">{errorMessage}</p>
+          <ul className="divide-y divide-red-100">
+            {invalidFiles.map((f, i) => (
+              <li key={i} className="px-5 py-2.5 flex items-center gap-3">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-red-800 truncate">{f.name}</p>
+                  <p className="text-xs text-red-500">{f.reason}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
-      {/* Success banner */}
-      {uploadStatus === 'success' && (
-        <div className="bg-green-50 text-green-700 p-4 rounded-xl border border-green-200 flex items-center gap-3">
-          <CheckCircle className="w-5 h-5 flex-shrink-0" />
-          <span className="font-semibold text-sm">Resumes uploaded and saved as Pending! Review them below.</span>
-        </div>
-      )}
-
-      {/* Selected files list (before upload) */}
+      {/* ── Selected Files List ── */}
       {files.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
@@ -263,134 +355,116 @@ const UploadResume = () => {
                   Uploading &amp; Parsing...
                 </>
               ) : (
-                'Upload & Parse Resumes'
+                <>
+                  <Upload className="w-4 h-4" />
+                  Upload &amp; Parse ({files.length} file{files.length > 1 ? 's' : ''})
+                </>
               )}
             </button>
           </div>
         </div>
       )}
 
-      {/* ---------------------------------------------------------------- */}
-      {/* Pending Resumes Section                                           */}
-      {/* ---------------------------------------------------------------- */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
-          <div className="flex items-center gap-2">
-            <Clock className="w-5 h-5 text-yellow-500" />
-            <h3 className="font-semibold text-gray-800">
-              Uploaded Resumes — Pending Review
-            </h3>
-            <span className="ml-1 text-xs font-medium bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full">
-              {pendingResumes.filter(r => r.status === 'Pending').length} pending
-            </span>
-          </div>
-          <div className="flex items-center gap-3">
-            <select
-              className="text-sm border border-gray-200 rounded-lg px-2 py-1 focus:ring-blue-500 focus:border-blue-500 text-gray-700 bg-white"
-              value={sortOrder}
-              onChange={(e) => setSortOrder(e.target.value)}
-            >
-              <option value="latest">Latest</option>
-              <option value="oldest">Oldest</option>
-            </select>
+      {/* ═══════════════════════════════════════════════════════ */}
+      {/* UPLOAD RESULTS PANEL                                    */}
+      {/* ═══════════════════════════════════════════════════════ */}
+      {uploadResults && uploadResults.results && uploadResults.results.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+            <h3 className="font-semibold text-gray-800">Upload Results</h3>
             <button
-              onClick={fetchPending}
-              title="Refresh"
-              className="text-gray-400 hover:text-blue-600 transition p-1"
+              onClick={() => setUploadResults(null)}
+              className="text-xs text-gray-500 hover:text-gray-700 font-medium"
             >
-              <RefreshCw className="w-4 h-4" />
+              Dismiss
             </button>
           </div>
-        </div>
 
-        {loadingPending ? (
-          <div className="flex justify-center items-center py-12">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
+          {/* Summary stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 px-6 py-4 border-b border-gray-100">
+            <div className="flex items-center gap-2 bg-emerald-50 rounded-lg p-3">
+              <CheckCircle className="w-5 h-5 text-emerald-500" />
+              <div>
+                <p className="text-lg font-bold text-emerald-700">{uploadResults.successCount || 0}</p>
+                <p className="text-xs text-emerald-600">Uploaded</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 bg-amber-50 rounded-lg p-3">
+              <Copy className="w-5 h-5 text-amber-500" />
+              <div>
+                <p className="text-lg font-bold text-amber-700">{uploadResults.duplicateCount || 0}</p>
+                <p className="text-xs text-amber-600">Duplicates</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 bg-red-50 rounded-lg p-3">
+              <FileWarning className="w-5 h-5 text-red-500" />
+              <div>
+                <p className="text-lg font-bold text-red-700">{uploadResults.invalidCount || 0}</p>
+                <p className="text-xs text-red-600">Invalid</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 bg-gray-50 rounded-lg p-3 border border-gray-200">
+              <AlertCircle className="w-5 h-5 text-gray-500" />
+              <div>
+                <p className="text-lg font-bold text-gray-700">{uploadResults.errorCount || 0}</p>
+                <p className="text-xs text-gray-600">Errors</p>
+              </div>
+            </div>
           </div>
-        ) : pendingResumes.length === 0 ? (
-          <div className="text-center py-12 text-gray-400">
-            <File className="w-10 h-10 mx-auto mb-2 opacity-40" />
-            <p className="text-sm">No pending resumes yet. Upload some above!</p>
+
+          {/* Per-file results */}
+          <div className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
+            {/* Success */}
+            {successResults.map((r, i) => (
+              <div key={`s-${i}`} className="px-6 py-3 flex items-center gap-3 bg-emerald-50/30">
+                <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-800 truncate">{r.fileName}</p>
+                  <p className="text-xs text-emerald-600">{r.reason}</p>
+                </div>
+                <ResultBadge status="SUCCESS" />
+              </div>
+            ))}
+
+            {/* Duplicates */}
+            {duplicateResults.map((r, i) => (
+              <div key={`d-${i}`} className="px-6 py-3 flex items-center gap-3 bg-amber-50/30">
+                <Copy className="w-4 h-4 text-amber-500 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-800 truncate">{r.fileName}</p>
+                  <p className="text-xs text-amber-600">{r.reason}</p>
+                </div>
+                <ResultBadge status="DUPLICATE" />
+              </div>
+            ))}
+
+            {/* Invalid */}
+            {invalidResults.map((r, i) => (
+              <div key={`i-${i}`} className="px-6 py-3 flex items-center gap-3 bg-red-50/30">
+                <FileWarning className="w-4 h-4 text-red-400 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-800 truncate">{r.fileName}</p>
+                  <p className="text-xs text-red-500">{r.reason}</p>
+                </div>
+                <ResultBadge status="INVALID" />
+              </div>
+            ))}
+
+            {/* Errors */}
+            {errorResults.map((r, i) => (
+              <div key={`e-${i}`} className="px-6 py-3 flex items-center gap-3 bg-red-50/30">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-800 truncate">{r.fileName}</p>
+                  <p className="text-xs text-red-500">{r.reason}</p>
+                </div>
+                <ResultBadge status="ERROR" />
+              </div>
+            ))}
           </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse min-w-[640px]">
-              <thead>
-                <tr className="bg-gray-50 border-b border-gray-100 text-xs uppercase text-gray-500 font-semibold tracking-wider">
-                  <th className="px-5 py-3">Candidate</th>
-                  <th className="px-5 py-3">Contact</th>
-                  <th className="px-5 py-3">Role</th>
-                  <th className="px-5 py-3">
-                    <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" />Uploaded At</span>
-                  </th>
-                  <th className="px-5 py-3 text-center">Status</th>
-                  <th className="px-5 py-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {sortedPending.map((resume) => (
-                  <tr key={resume.id} className="hover:bg-gray-50 transition">
-                    <td className="px-5 py-3">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-sm border border-blue-200 shrink-0">
-                          {resume.name?.charAt(0) || 'U'}
-                        </div>
-                        <div>
-                          <p className="text-sm font-semibold text-gray-900">{resume.name || 'Unknown'}</p>
-                          <p className="text-xs text-gray-400">{resume.location || ''}</p>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-5 py-3">
-                      <p className="text-xs text-gray-700 truncate max-w-[160px]">{resume.email || '—'}</p>
-                      <p className="text-xs text-gray-400 mt-0.5">{resume.phone || '—'}</p>
-                    </td>
-                    <td className="px-5 py-3">
-                      <span className="text-xs text-blue-600 font-medium">{resume.jobRole || 'N/A'}</span>
-                    </td>
-                    <td className="px-5 py-3">
-                      <span className="text-xs text-gray-500">{formatDateTime(resume.uploadedAt)}</span>
-                    </td>
-                    <td className="px-5 py-3 text-center">
-                      <StatusBadge status={resume.status} />
-                    </td>
-                    <td className="px-5 py-3 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        {resume.status === 'Pending' && (
-                          <>
-                            <button
-                              onClick={() => handleVerify(resume.id)}
-                              className="px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-xs font-medium rounded-lg transition shadow-sm"
-                            >
-                              Verify
-                            </button>
-                            <button
-                              onClick={() => navigate('/review', { state: { candidateData: resume } })}
-                              className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-medium rounded-lg transition"
-                            >
-                              Review
-                            </button>
-                            <button
-                              onClick={() => handleDelete(resume.id)}
-                              className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition"
-                              title="Remove"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </>
-                        )}
-                        {resume.status === 'Verified' && (
-                          <span className="text-xs text-green-600 font-medium">✓ Moved to Dashboard</span>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
+
     </div>
   );
 };

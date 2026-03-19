@@ -3,8 +3,11 @@ import { Link } from 'react-router-dom';
 import {
   Search, MapPin, Briefcase, FileText, ChevronRight,
   Users, LayoutGrid, List, CheckCircle, Clock,
-  Trash2, AlertTriangle, X, Mail, Phone, Calendar
+  Trash2, AlertTriangle, X, Mail, Phone, Calendar,
+  ShieldCheck
 } from 'lucide-react';
+import api from '../services/api';
+import { useToast, ToastContainer } from '../components/Toast';
 
 const formatDateTime = (isoStr) => {
   if (!isoStr) return '—';
@@ -33,17 +36,22 @@ const getTimeMs = (isoStr) => {
   const d = new Date(isoStr);
   return isNaN(d.getTime()) ? 0 : d.getTime();
 };
-import api from '../services/api';
 
-const ConfirmDialog = ({ message, onConfirm, onCancel }) => (
+// ── Confirm Dialog ──
+const ConfirmDialog = ({ title, message, confirmLabel, confirmIcon, confirmColor, onConfirm, onCancel }) => (
   <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
     <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onCancel} />
     <div className="relative bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full border border-gray-100">
       <div className="flex items-center gap-3 mb-4">
-        <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center shrink-0">
-          <AlertTriangle className="w-5 h-5 text-red-600" />
+        <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+          confirmColor === 'red' ? 'bg-red-100' : 'bg-blue-100'
+        }`}>
+          {confirmColor === 'red'
+            ? <AlertTriangle className="w-5 h-5 text-red-600" />
+            : <ShieldCheck className="w-5 h-5 text-blue-600" />
+          }
         </div>
-        <h3 className="text-base font-semibold text-gray-900">Confirm Deletion</h3>
+        <h3 className="text-base font-semibold text-gray-900">{title || 'Confirm'}</h3>
       </div>
       <p className="text-sm text-gray-600 mb-6">{message}</p>
       <div className="flex gap-3 justify-end">
@@ -55,9 +63,13 @@ const ConfirmDialog = ({ message, onConfirm, onCancel }) => (
         </button>
         <button
           onClick={onConfirm}
-          className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition flex items-center gap-1.5 shadow-sm"
+          className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition flex items-center gap-1.5 shadow-sm ${
+            confirmColor === 'red'
+              ? 'bg-red-600 hover:bg-red-700'
+              : 'bg-blue-600 hover:bg-blue-700'
+          }`}
         >
-          <Trash2 className="w-4 h-4" /> Delete
+          {confirmIcon}{confirmLabel || 'Confirm'}
         </button>
       </div>
     </div>
@@ -72,11 +84,12 @@ const Dashboard = () => {
   const [filterStatus, setFilterStatus] = useState('All');
   const [sortOrder, setSortOrder] = useState('latest');
   const [viewMode, setViewMode] = useState('table');
-  const [notification, setNotification] = useState(null);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 8;
+
+  const { toasts, addToast, removeToast } = useToast();
 
   const fetchCandidates = async () => {
     try {
@@ -84,6 +97,7 @@ const Dashboard = () => {
       setCandidates(response.data);
     } catch (error) {
       console.error('Error fetching candidates:', error);
+      addToast('Failed to load candidates.', 'error');
     } finally {
       setLoading(false);
     }
@@ -91,36 +105,75 @@ const Dashboard = () => {
 
   useEffect(() => { fetchCandidates(); }, []);
 
-  const showNotification = (message, type = 'success') => {
-    setNotification({ message, type });
-    setTimeout(() => setNotification(null), 3000);
-  };
-
   const approveCandidate = async (id) => {
     try {
       await api.put(`/resume/candidate/${id}/verify`);
       await fetchCandidates();
-      showNotification('Candidate successfully verified!');
+      addToast('Candidate verified successfully!', 'success');
     } catch (error) {
       console.error('Error approving candidate:', error);
-      showNotification(error.response?.data?.message || 'Failed to verify candidate', 'error');
+      addToast(error.response?.data?.message || 'Failed to verify candidate.', 'error');
     }
   };
 
+
+
+  // ── Bulk Verify ──
+  const handleBulkVerify = () => {
+    const count = selectedIds.size;
+    setConfirmDialog({
+      title: 'Bulk Verify',
+      message: `Are you sure you want to verify ${count} selected candidate${count > 1 ? 's' : ''}?`,
+      confirmLabel: 'Verify All',
+      confirmIcon: <ShieldCheck className="w-4 h-4" />,
+      confirmColor: 'blue',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        try {
+          const response = await api.post('/resume/candidates/bulk-verify', Array.from(selectedIds));
+          const results = response.data;
+          const successCount = results.filter(r => r.status === 'SUCCESS').length;
+          const failedCount = results.filter(r => r.status === 'FAILED').length;
+
+          if (successCount > 0) {
+            addToast(`${successCount} candidate${successCount > 1 ? 's' : ''} verified!`, 'success');
+          }
+          if (failedCount > 0) {
+            const failures = results.filter(r => r.status === 'FAILED');
+            failures.forEach(f => {
+              addToast(`Verify failed: ${f.reason}`, 'warning');
+            });
+          }
+
+          setSelectedIds(new Set());
+          await fetchCandidates();
+        } catch (err) {
+          console.error('Bulk verify error:', err);
+          addToast('Failed to verify selected candidates.', 'error');
+        }
+      },
+    });
+  };
+
+  // ── Bulk Delete ──
   const handleBulkDelete = () => {
     const count = selectedIds.size;
     setConfirmDialog({
+      title: 'Confirm Deletion',
       message: `Are you sure you want to delete ${count} selected candidate${count > 1 ? 's' : ''}? This action cannot be undone.`,
+      confirmLabel: 'Delete',
+      confirmIcon: <Trash2 className="w-4 h-4" />,
+      confirmColor: 'red',
       onConfirm: async () => {
         setConfirmDialog(null);
         try {
           await api.delete('/resume/candidates/bulk', { data: Array.from(selectedIds) });
           setSelectedIds(new Set());
           await fetchCandidates();
-          showNotification(`${count} candidate${count > 1 ? 's' : ''} deleted successfully.`);
+          addToast(`${count} candidate${count > 1 ? 's' : ''} deleted successfully.`, 'success');
         } catch (err) {
           console.error('Bulk delete error:', err);
-          showNotification('Failed to delete selected candidates.', 'error');
+          addToast('Failed to delete selected candidates.', 'error');
         }
       },
     });
@@ -187,22 +240,20 @@ const Dashboard = () => {
 
   return (
     <div className="space-y-6 relative">
+      {/* Toast notifications */}
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
 
+      {/* Confirm Dialog */}
       {confirmDialog && (
         <ConfirmDialog
+          title={confirmDialog.title}
           message={confirmDialog.message}
+          confirmLabel={confirmDialog.confirmLabel}
+          confirmIcon={confirmDialog.confirmIcon}
+          confirmColor={confirmDialog.confirmColor}
           onConfirm={confirmDialog.onConfirm}
           onCancel={() => setConfirmDialog(null)}
         />
-      )}
-
-      {notification && (
-        <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all duration-300 ${notification.type === 'success'
-          ? 'bg-green-100 text-green-800 border border-green-200'
-          : 'bg-red-100 text-red-800 border border-red-200'
-          }`}>
-          {notification.message}
-        </div>
       )}
 
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -269,10 +320,22 @@ const Dashboard = () => {
 
         <div className="flex items-center justify-between gap-3 flex-wrap">
           {selectedIds.size > 0 ? (
-            <div className="flex items-center gap-3 bg-red-50 border border-red-200 rounded-lg px-4 py-2">
-              <span className="text-sm font-medium text-red-700">
+            <div className="flex items-center gap-3 bg-gray-50 border border-gray-200 rounded-lg px-4 py-2">
+              <span className="text-sm font-medium text-gray-700">
                 {selectedIds.size} candidate{selectedIds.size > 1 ? 's' : ''} selected
               </span>
+
+
+              {/* Bulk Verify button */}
+              <button
+                onClick={handleBulkVerify}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg transition shadow-sm"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                Verify Selected
+              </button>
+
+              {/* Bulk Delete button */}
               <button
                 onClick={handleBulkDelete}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-medium rounded-lg transition shadow-sm"
@@ -280,6 +343,7 @@ const Dashboard = () => {
                 <Trash2 className="w-3.5 h-3.5" />
                 Delete Selected
               </button>
+
               <button
                 onClick={() => setSelectedIds(new Set())}
                 className="text-gray-400 hover:text-gray-600 transition"
