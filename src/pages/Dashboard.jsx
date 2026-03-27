@@ -218,21 +218,23 @@ const Dashboard = () => {
     });
   };
 
-  const allCurrentSelected =
-    currentCandidates.length > 0 &&
-    currentCandidates.every(c => selectedIds.has(c.id));
+  const allFilteredSelected =
+    sortedCandidates.length > 0 &&
+    sortedCandidates.every(c => selectedIds.has(c.id));
 
   const toggleSelectAll = () => {
-    if (allCurrentSelected) {
+    if (allFilteredSelected) {
+      // Deselect all filtered candidates
       setSelectedIds(prev => {
         const s = new Set(prev);
-        currentCandidates.forEach(c => s.delete(c.id));
+        sortedCandidates.forEach(c => s.delete(c.id));
         return s;
       });
     } else {
+      // Select all filtered candidates (across ALL pages)
       setSelectedIds(prev => {
         const s = new Set(prev);
-        currentCandidates.forEach(c => s.add(c.id));
+        sortedCandidates.forEach(c => s.add(c.id));
         return s;
       });
     }
@@ -399,10 +401,10 @@ const Dashboard = () => {
                       <th className="p-4 w-10">
                         <input
                           type="checkbox"
-                          checked={allCurrentSelected}
+                          checked={allFilteredSelected}
                           onChange={toggleSelectAll}
                           className="w-4 h-4 rounded border-gray-300 text-blue-600 cursor-pointer accent-blue-600"
-                          title="Select all on this page"
+                          title={`Select all ${sortedCandidates.length} candidates`}
                         />
                       </th>
                       <th className="p-4">Candidate</th>
