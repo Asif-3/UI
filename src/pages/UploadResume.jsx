@@ -37,18 +37,27 @@ const getTimeMs = (isoStr) => {
   return isNaN(d.getTime()) ? 0 : d.getTime();
 };
 
-// ── Allowed file types ──
+// ── File validation constants ──
 const ALLOWED_TYPES = [
   'application/pdf',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 ];
 const ALLOWED_EXTENSIONS = ['.pdf', '.doc', '.docx'];
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB in bytes
 
-const isValidFile = (file) => {
+const isValidFileFormat = (file) => {
   if (ALLOWED_TYPES.includes(file.type)) return true;
   const name = file.name.toLowerCase();
   return ALLOWED_EXTENSIONS.some(ext => name.endsWith(ext));
+};
+
+const isValidFileSize = (file) => {
+  return file.size <= MAX_FILE_SIZE;
+};
+
+const isValidFile = (file) => {
+  return isValidFileFormat(file) && isValidFileSize(file);
 };
 
 // ── Status Badge ──
@@ -116,8 +125,11 @@ const ResultBadge = ({ status }) => {
 const UploadResume = () => {
   const [files, setFiles] = useState([]);
   const [invalidFiles, setInvalidFiles] = useState([]);
+  const [oversizedFiles, setOversizedFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [uploadResults, setUploadResults] = useState(null);
+  const [errorData, setErrorData] = useState(null);
+  const [error, setError] = useState(null);
   const [dragOver, setDragOver] = useState(false);
 
   const fileInputRef = useRef(null);
@@ -128,23 +140,54 @@ const UploadResume = () => {
   const validateAndAdd = (selected) => {
     const valid = [];
     const invalid = [];
+    const oversized = [];
 
     selected.forEach(f => {
-      if (isValidFile(f)) {
-        valid.push(f);
-      } else {
+      if (!isValidFileFormat(f)) {
         invalid.push({ name: f.name, reason: 'Unsupported format. Only PDF, DOC, DOCX allowed.' });
+      } else if (!isValidFileSize(f)) {
+        const sizeMB = (f.size / (1024 * 1024)).toFixed(2);
+        oversized.push({ name: f.name, sizeMB, reason: `File exceeds 5MB limit (${sizeMB} MB)` });
+      } else {
+        valid.push(f);
       }
     });
 
+    // Handle oversized files
+    if (oversized.length > 0) {
+      setOversizedFiles(prev => [...prev, ...oversized]);
+      
+      if (oversized.length === 1 && selected.length === 1) {
+        // Single oversized file only
+        addToast(
+          `⚠ File Skipped: "${oversized[0].name}" (${oversized[0].sizeMB} MB) exceeds 5MB limit`,
+          'warning'
+        );
+      } else if (valid.length === 0) {
+        // All files are oversized
+        addToast(
+          `⚠ ${oversized.length} file${oversized.length > 1 ? 's' : ''} skipped — all exceed 5MB limit`,
+          'warning'
+        );
+      } else {
+        // Mixed: some valid, some oversized
+        addToast(
+          `⚠ ${oversized.length} file${oversized.length > 1 ? 's' : ''} skipped — exceeds 5MB limit`,
+          'warning'
+        );
+      }
+    }
+
+    // Handle invalid format files
     if (invalid.length > 0) {
       setInvalidFiles(prev => [...prev, ...invalid]);
       addToast(
-        `${invalid.length} file${invalid.length > 1 ? 's' : ''} rejected — unsupported format.`,
-        'warning'
+        `❌ ${invalid.length} file${invalid.length > 1 ? 's' : ''} rejected — unsupported format`,
+        'error'
       );
     }
 
+    // Add valid files
     if (valid.length > 0) {
       setFiles(prev => [...prev, ...valid]);
     }
@@ -157,6 +200,7 @@ const UploadResume = () => {
 
   const removeFile = (i) => setFiles(files.filter((_, idx) => idx !== i));
   const clearInvalid = () => setInvalidFiles([]);
+  const clearOversized = () => setOversizedFiles([]);
 
   const onDragOver = (e) => { e.preventDefault(); setDragOver(true); };
   const onDragLeave = () => setDragOver(false);
@@ -171,6 +215,8 @@ const UploadResume = () => {
     if (files.length === 0) return;
     setUploading(true);
     setUploadResults(null);
+    setErrorData(null);
+    setError(null);
 
     const formData = new FormData();
     for (let file of files) formData.append('file', file);
@@ -188,16 +234,16 @@ const UploadResume = () => {
       const { successCount = 0, duplicateCount = 0, invalidCount = 0, errorCount = 0 } = data;
 
       if (successCount > 0) {
-        addToast(`${successCount} resume${successCount > 1 ? 's' : ''} uploaded successfully!`, 'success');
+        addToast(`✅ ${successCount} resume${successCount > 1 ? 's' : ''} uploaded successfully!`, 'success');
       }
       if (duplicateCount > 0) {
-        addToast(`${duplicateCount} duplicate${duplicateCount > 1 ? 's' : ''} detected and skipped.`, 'warning');
+        addToast(`⚠ ${duplicateCount} duplicate${duplicateCount > 1 ? 's' : ''} detected and skipped.`, 'warning');
       }
       if (invalidCount > 0) {
-        addToast(`${invalidCount} file${invalidCount > 1 ? 's' : ''} had invalid format.`, 'error');
+        addToast(`❌ ${invalidCount} file${invalidCount > 1 ? 's' : ''} had invalid format.`, 'error');
       }
       if (errorCount > 0) {
-        addToast(`${errorCount} file${errorCount > 1 ? 's' : ''} failed to process.`, 'error');
+        addToast(`❌ ${errorCount} file${errorCount > 1 ? 's' : ''} failed to process.`, 'error');
       }
 
       // Log to backend
@@ -209,13 +255,16 @@ const UploadResume = () => {
         });
       } catch (_) { /* silent */ }
 
-
-    } catch (error) {
-      console.error('Upload Error:', error);
-      addToast(
-        error.response?.data?.message || 'Failed to upload resumes. Please ensure the backend is running.',
-        'error'
-      );
+    } catch (err) {
+      console.error('Upload Error:', err);
+      const data = err.response?.data;
+      if (data && data.status === 'error') {
+        setErrorData(data);
+        setError(null);
+      } else {
+        setErrorData(null);
+        setError(data?.message || 'Server not reachable');
+      }
     } finally {
       setUploading(false);
     }
@@ -308,6 +357,43 @@ const UploadResume = () => {
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-red-800 truncate">{f.name}</p>
                   <p className="text-xs text-red-500">{f.reason}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* ── Oversized Files Panel ── */}
+      {oversizedFiles.length > 0 && (
+        <div className="bg-amber-50 rounded-xl border border-amber-200 overflow-hidden">
+          <div className="px-5 py-3 border-b border-amber-200 flex justify-between items-center bg-amber-100/50">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600" />
+              <h3 className="font-semibold text-amber-800 text-sm">
+                ⚠ Oversized Files ({oversizedFiles.length})
+              </h3>
+            </div>
+            <button onClick={clearOversized} className="text-xs text-amber-600 hover:text-amber-800 font-medium">
+              Dismiss
+            </button>
+          </div>
+          <ul className="divide-y divide-amber-100">
+            {oversizedFiles.map((f, i) => (
+              <li key={i} className="px-5 py-3 flex items-start gap-3">
+                <div className="flex flex-col gap-1 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">📄</span>
+                    <p className="text-sm font-medium text-amber-900">{f.name}</p>
+                  </div>
+                  <div className="flex items-center gap-2 ml-7 text-xs text-amber-700">
+                    <span className="text-base">📦</span>
+                    Size: <span className="font-semibold">{f.sizeMB} MB</span>
+                  </div>
+                  <div className="flex items-center gap-2 ml-7 text-xs text-red-600 mt-1">
+                    <span className="text-base">❌</span>
+                    The given file is not within the allowed size limit (Max: 5MB)
+                  </div>
                 </div>
               </li>
             ))}
@@ -462,6 +548,76 @@ const UploadResume = () => {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════ */}
+      {/* ERROR PANEL                                             */}
+      {/* ═══════════════════════════════════════════════════════ */}
+      {(errorData || error) && (
+        <div className="bg-red-50 rounded-xl shadow-sm border border-red-200 overflow-hidden">
+          <div className="px-6 py-4 border-b border-red-200 bg-red-100/50 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-red-600" />
+              <h3 className="font-semibold text-red-800">Upload Failed</h3>
+            </div>
+            <button
+              onClick={() => { setErrorData(null); setError(null); }}
+              className="text-xs text-red-600 hover:text-red-800 font-medium"
+            >
+              Dismiss
+            </button>
+          </div>
+          
+          {errorData ? (
+            <div className="p-6 space-y-4">
+              {errorData.message && (
+                <p className="text-sm font-medium text-red-800">{errorData.message}</p>
+              )}
+              
+              {/* Files List */}
+              {errorData.files && errorData.files.length > 0 && (
+                <div className="space-y-4 mt-4">
+                  {errorData.files.map((file, idx) => (
+                    <div key={idx} className="bg-white border border-red-200 rounded-lg p-5 flex flex-col gap-2 shadow-sm">
+                      <div className="flex items-center gap-2 text-gray-900 font-semibold text-sm">
+                        <span className="text-lg">📄</span>
+                        {file.file_name}
+                      </div>
+                      <div className="text-sm text-gray-700 ml-7 flex items-center gap-2">
+                        <span className="text-base">📦</span>
+                        <span className="font-semibold text-gray-900">Size:</span> {file.size_mb} MB
+                      </div>
+                      <div className="text-sm text-red-700 ml-7 flex items-center gap-2">
+                        <span className="text-base">❌</span>
+                        <span className="font-semibold">Reason:</span> {file.reason}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              
+              {/* Largest File Highlight */}
+              {errorData.largest_file && (
+                <div className="mt-6 bg-red-100 border-2 border-red-300 rounded-lg p-4 flex items-start gap-4 shadow-sm">
+                  <span className="text-2xl mt-0.5">🚨</span>
+                  <div>
+                    <h4 className="text-sm font-bold text-red-900 uppercase tracking-wide">Largest File</h4>
+                    <p className="text-sm text-red-800 mt-1 font-medium">
+                      {errorData.largest_file.file_name} <span className="opacity-80">({errorData.largest_file.size_mb} MB)</span>
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="p-6">
+              <p className="text-sm text-red-700 font-medium flex items-center gap-2">
+                <AlertCircle className="w-4 h-4" />
+                {error}
+              </p>
+            </div>
+          )}
         </div>
       )}
 
