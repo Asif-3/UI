@@ -485,16 +485,18 @@ const UploadResume = () => {
             <div className="flex items-center gap-2 bg-red-50 rounded-lg p-3">
               <FileWarning className="w-5 h-5 text-red-500" />
               <div>
-                <p className="text-lg font-bold text-red-700">{uploadResults.invalidCount || 0}</p>
+                <p className="text-lg font-bold text-red-700">
+                  {(uploadResults.invalidCount || 0) + invalidFiles.length + oversizedFiles.length}
+                </p>
                 <p className="text-xs text-red-600">Invalid</p>
               </div>
             </div>
             <div className="flex items-center gap-2 bg-gray-50 rounded-lg p-3 border border-gray-200">
               <AlertCircle className="w-5 h-5 text-gray-500" />
-              <div>
-                <p className="text-lg font-bold text-gray-700">{uploadResults.errorCount || 0}</p>
-                <p className="text-xs text-gray-600">Errors</p>
-              </div>
+              <p className="text-lg font-bold text-gray-700">
+                {(uploadResults.errorCount || 0) + (error ? 1 : 0) + (errorData ? 1 : 0)}
+              </p>
+              <p className="text-xs text-gray-600">Errors</p>
             </div>
           </div>
 
