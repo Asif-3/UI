@@ -258,12 +258,42 @@ const UploadResume = () => {
     } catch (err) {
       console.error('Upload Error:', err);
       const data = err.response?.data;
-      if (data && data.status === 'error') {
+      
+      const failedCount = files.length;
+      let errorReason = null;
+
+      if (data && data.status === 'ERROR' && data.message === 'Database connection lost. Data not saved.') {
+        errorReason = '❌ Database connection lost. Data not saved.';
+      } else if (!err.response) {
+        errorReason = '❌ Server not reachable. Backend or Database is down.';
+      } else if (err.response.status >= 500) {
+        errorReason = `❌ Internal Server Error (${err.response.status}). Data not saved.`;
+      }
+
+      if (errorReason && failedCount > 0) {
+        const failedResults = files.map(file => ({
+          fileName: file.name,
+          status: 'ERROR',
+          reason: errorReason
+        }));
+        
+        setFiles([]);
+        setUploadResults({
+          successCount: 0,
+          duplicateCount: 0,
+          invalidCount: 0,
+          errorCount: failedCount,
+          results: failedResults
+        });
+        setErrorData(null);
+        setError(null);
+        addToast(`❌ ${failedCount} file${failedCount > 1 ? 's' : ''} failed to process.`, 'error');
+      } else if (data && data.status === 'error') {
         setErrorData(data);
         setError(null);
       } else {
         setErrorData(null);
-        setError(data?.message || 'Server not reachable');
+        setError(data?.message || err.message || 'Server not reachable');
       }
     } finally {
       setUploading(false);
@@ -496,7 +526,9 @@ const UploadResume = () => {
               <p className="text-lg font-bold text-gray-700">
                 {(uploadResults.errorCount || 0) + (error ? 1 : 0) + (errorData ? 1 : 0)}
               </p>
-              <p className="text-xs text-gray-600">Errors</p>
+              <p className="text-xs text-gray-600">
+                {((uploadResults.errorCount || 0) + (error ? 1 : 0) + (errorData ? 1 : 0)) === 1 ? 'Error' : 'Errors'}
+              </p>
             </div>
           </div>
 
